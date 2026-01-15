@@ -154,7 +154,7 @@ export const getRoleDisplayText = (roleValues) => {
 /**
  * 从 events 数据中提取 vosdk.vocs 事件的 localWanIp
  * @param {string|Array} eventsData - events 数据（JSON 字符串或已解析的数组）
- * @returns {Array|null} 去重后的 localWanIp 数组，如果未找到则返回 null
+ * @returns {Array|null} 去重后的 localWanIp 数组，如果未找到或全部为空则返回 null
  */
 export const getLocalWanIpFromVocs = (eventsData) => {
   if (!eventsData) {
@@ -193,14 +193,19 @@ export const getLocalWanIpFromVocs = (eventsData) => {
       const details = event.details;
       if (details.name === 'vosdk.vocs' && details.localWanIp) {
         const localWanIp = details.localWanIp;
-        console.log('getLocalWanIpFromVocs: 找到 localWanIp:', localWanIp);
-        ipSet.add(localWanIp);
+        // 过滤掉空值：null、undefined、空字符串
+        if (localWanIp && typeof localWanIp === 'string' && localWanIp.trim() !== '') {
+          console.log('getLocalWanIpFromVocs: 找到 localWanIp:', localWanIp);
+          ipSet.add(localWanIp.trim());
+        } else {
+          console.log('getLocalWanIpFromVocs: 跳过空的 localWanIp:', localWanIp);
+        }
       }
     }
   }
 
   if (ipSet.size === 0) {
-    console.warn('getLocalWanIpFromVocs: 未找到 vosdk.vocs 事件的 localWanIp 数据');
+    console.warn('getLocalWanIpFromVocs: 未找到有效的 vosdk.vocs 事件的 localWanIp 数据');
     return null;
   }
 
@@ -211,20 +216,44 @@ export const getLocalWanIpFromVocs = (eventsData) => {
 };
 
 /**
+ * 检测是否存在多出口风险（多个不同的 localWanIp）
+ * @param {Array} ipArray - IP 地址数组
+ * @returns {boolean} 如果存在多个不同的 IP 地址，返回 true，否则返回 false
+ */
+export const hasMultipleExitRisk = (ipArray) => {
+  if (!ipArray || !Array.isArray(ipArray) || ipArray.length <= 1) {
+    return false;
+  }
+  
+  // 如果数组中有多个不同的 IP 地址，说明存在多出口风险
+  const uniqueIps = new Set(ipArray);
+  return uniqueIps.size > 1;
+};
+
+/**
  * 获取 IP 地址显示文本
  * @param {Array} ipArray - IP 地址数组
+ * @param {boolean} showRiskWarning - 是否显示多出口风险警告
  * @returns {string} IP 地址显示文本
  */
-export const getIpDisplayText = (ipArray) => {
+export const getIpDisplayText = (ipArray, showRiskWarning = false) => {
   if (!ipArray || !Array.isArray(ipArray) || ipArray.length === 0) {
     return null;
   }
 
+  let displayText = '';
   if (ipArray.length === 1) {
-    return `IP: ${ipArray[0]}`;
+    displayText = `IP: ${ipArray[0]}`;
   } else {
-    return `IP: ${ipArray.join(', ')}`;
+    displayText = `IP: ${ipArray.join(', ')}`;
   }
+
+  // 如果存在多出口风险，添加警告提示
+  if (showRiskWarning && hasMultipleExitRisk(ipArray)) {
+    displayText += ' ⚠️ 多出口风险';
+  }
+
+  return displayText;
 };
 
 /**
@@ -273,11 +302,57 @@ export const getIpLocationInfo = async (ipAddress) => {
 };
 
 /**
+ * 获取服务端 IP 信息
+ * 通过 background script 发送请求以避免 CORS 问题
+ * @param {string} ipAddress - IP 地址
+ * @returns {Promise<Object|null>} 服务端 IP 信息对象，如果失败则返回 null
+ */
+export const getServerIpInfo = async (ipAddress) => {
+  if (!ipAddress || typeof ipAddress !== 'string') {
+    console.warn('getServerIpInfo: IP 地址无效');
+    return null;
+  }
+
+  try {
+    console.log('🖥️ 请求服务端 IP 信息:', ipAddress);
+
+    // 使用 chrome.runtime.sendMessage 发送请求
+    const response = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: 'FETCH_SERVER_IP_INFO',
+          data: { ipAddress: ipAddress }
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+
+          if (response && response.success) {
+            resolve(response.data);
+          } else {
+            reject(new Error(response?.error || 'Unknown error'));
+          }
+        }
+      );
+    });
+
+    console.log('✅ 获取到服务端 IP 信息:', response);
+    return response;
+  } catch (error) {
+    console.error('getServerIpInfo: 获取服务端 IP 信息失败', error);
+    return null;
+  }
+};
+
+/**
  * 创建 IP 信息悬浮提示框
  * @param {Object} locationData - 地理位置数据
+ * @param {Object} serverIpData - 服务端 IP 数据
  * @returns {HTMLElement} 提示框元素
  */
-const createIpInfoTooltip = (locationData) => {
+const createIpInfoTooltip = (locationData, serverIpData = null) => {
   // 移除已存在的提示框
   const existingTooltip = document.querySelector('.ip-info-tooltip');
   if (existingTooltip) {
@@ -288,10 +363,10 @@ const createIpInfoTooltip = (locationData) => {
   tooltip.className = 'ip-info-tooltip';
 
   // 提取需要显示的字段
-  const country = locationData.country_name || '未知';
-  const region = locationData.region_name || '未知';
-  const city = locationData.city_name || '未知';
-  const line = locationData.line || '未知';
+  const country = locationData?.country_name || '未知';
+  const region = locationData?.region_name || '未知';
+  const city = locationData?.city_name || '未知';
+  const line = locationData?.line || '未知';
 
   // 翻译 line 信息
   const lineDisplay = lineTranslationMap[line] || line;
@@ -322,6 +397,35 @@ const createIpInfoTooltip = (locationData) => {
     `;
   }
 
+  // 显示服务端 IP 信息
+  if (serverIpData && serverIpData.results && Array.isArray(serverIpData.results) && serverIpData.results.length > 0) {
+    tooltipContent += `
+      <div style="padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, 0.2); margin-top: 8px;">
+        <div style="font-weight: 600; margin-bottom: 6px; color: #4fc3f7;">🖥️ 服务端信息</div>
+    `;
+
+    // 显示每个数据中心的信息
+    serverIpData.results.forEach((result, index) => {
+      const dataCenter = result.data_center || '未知';
+      const ipAddresses = result.ip_addresses || '未知';
+      const services = result.services || '未知';
+      
+      // 格式化服务列表
+      const servicesList = typeof services === 'string' ? services.split(',').map(s => s.trim()) : [];
+      const servicesDisplay = servicesList.length > 0 ? servicesList.join(', ') : services;
+
+      tooltipContent += `
+        <div style="padding: 6px 0; ${index < serverIpData.results.length - 1 ? 'border-bottom: 1px solid rgba(255, 255, 255, 0.1);' : ''}">
+          <div style="font-weight: 500; margin-bottom: 4px; color: #81c784;">${dataCenter}</div>
+          <div style="font-size: 11px; opacity: 0.8; margin-bottom: 2px; word-break: break-all;">IP: ${ipAddresses}</div>
+          <div style="font-size: 11px; opacity: 0.7; color: #ffb74d;">服务: ${servicesDisplay}</div>
+        </div>
+      `;
+    });
+
+    tooltipContent += `</div>`;
+  }
+
   // 如果没有数据，显示默认消息
   if (!tooltipContent) {
     tooltipContent = `
@@ -333,7 +437,8 @@ const createIpInfoTooltip = (locationData) => {
 
   tooltip.innerHTML = tooltipContent;
 
-  // 设置样式
+  // 设置样式（如果有服务端信息，增加最大宽度）
+  const hasServerInfo = serverIpData && serverIpData.results && serverIpData.results.length > 0;
   Object.assign(tooltip.style, {
     position: 'fixed',
     zIndex: '99999',
@@ -344,8 +449,10 @@ const createIpInfoTooltip = (locationData) => {
     fontSize: '13px',
     lineHeight: '1.6',
     boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
-    maxWidth: '300px',
+    maxWidth: hasServerInfo ? '500px' : '300px',
     minWidth: '200px',
+    maxHeight: '600px',
+    overflowY: 'auto',
     wordWrap: 'break-word',
     border: '1px solid rgba(255, 255, 255, 0.2)',
     pointerEvents: 'none',
@@ -386,17 +493,20 @@ export const showIpInfoTooltip = async (event, ipAddress) => {
   document.body.appendChild(loadingTooltip);
 
   try {
-    // 获取地理位置信息
-    const locationData = await getIpLocationInfo(ipAddress);
+    // 并行获取地理位置信息和服务端 IP 信息
+    const [locationData, serverIpData] = await Promise.all([
+      getIpLocationInfo(ipAddress),
+      getServerIpInfo(ipAddress)
+    ]);
 
     // 移除加载提示框
     loadingTooltip.remove();
 
-    if (!locationData) {
-      // 显示错误提示
+    // 如果两个都失败，显示错误提示
+    if (!locationData && !serverIpData) {
       const errorTooltip = document.createElement('div');
       errorTooltip.className = 'ip-info-tooltip';
-      errorTooltip.innerHTML = '<div style="padding: 8px; color: #ff6b6b;">无法获取地理位置信息</div>';
+      errorTooltip.innerHTML = '<div style="padding: 8px; color: #ff6b6b;">无法获取 IP 信息</div>';
       Object.assign(errorTooltip.style, {
         position: 'fixed',
         zIndex: '99999',
@@ -418,8 +528,8 @@ export const showIpInfoTooltip = async (event, ipAddress) => {
       return;
     }
 
-    // 创建并显示提示框
-    const tooltip = createIpInfoTooltip(locationData);
+    // 创建并显示提示框（即使只有一个数据源有数据也显示）
+    const tooltip = createIpInfoTooltip(locationData || {}, serverIpData);
 
     // 定位提示框
     requestAnimationFrame(() => {
@@ -1483,7 +1593,10 @@ export const updateBaseInfo = (responseText, eventsData = null) => {
   // 将 channelProfile 和 roleValues 信息合并到同一行显示
   const channelProfileText = channelProfile !== null ? getChannelProfileDisplayText(channelProfile) : null;
   const roleText = roleValues !== null ? getRoleDisplayText(roleValues) : null;
-  const ipText = localWanIpArray !== null ? getIpDisplayText(localWanIpArray) : null;
+  
+  // 检测多出口风险
+  const hasMultipleExit = localWanIpArray !== null ? hasMultipleExitRisk(localWanIpArray) : false;
+  const ipText = localWanIpArray !== null ? getIpDisplayText(localWanIpArray, true) : null;
 
   if (channelProfileText !== null || roleText !== null || ipText !== null) {
     let combinedText = '';
@@ -1506,7 +1619,9 @@ export const updateBaseInfo = (responseText, eventsData = null) => {
         const ipElements = localWanIpArray.map(ip =>
           `<span class="ip-address-item" data-ip-address="${ip}" style="cursor: pointer; text-decoration: underline; color: white; margin: 0 2px;">${ip}</span>`
         ).join(', ');
-        combinedText += `🌐 IP: ${ipElements}`;
+        // 如果存在多出口风险，添加警告样式
+        const riskWarning = hasMultipleExit ? ' <span style="color: #ff6b6b; font-weight: bold; background: rgba(255, 107, 107, 0.2); padding: 2px 6px; border-radius: 3px;">⚠️ 多出口风险</span>' : '';
+        combinedText += `🌐 IP: ${ipElements}${riskWarning}`;
       } else {
         combinedText += `🌐 ${ipText}`;
       }
@@ -2024,8 +2139,10 @@ export default {
   checkPrivileges,
   getApmStatus,
   getLocalWanIpFromVocs,
+  hasMultipleExitRisk,
   getIpDisplayText,
   getIpLocationInfo,
+  getServerIpInfo,
   showIpInfoTooltip,
   hideIpInfoTooltip,
   setupIpHoverEvents,
@@ -2051,8 +2168,10 @@ if (typeof window !== 'undefined') {
   window.checkPrivileges = checkPrivileges;
   window.getApmStatus = getApmStatus;
   window.getLocalWanIpFromVocs = getLocalWanIpFromVocs;
+  window.hasMultipleExitRisk = hasMultipleExitRisk;
   window.getIpDisplayText = getIpDisplayText;
   window.getIpLocationInfo = getIpLocationInfo;
+  window.getServerIpInfo = getServerIpInfo;
   window.showIpInfoTooltip = showIpInfoTooltip;
   window.hideIpInfoTooltip = hideIpInfoTooltip;
   window.setupIpHoverEvents = setupIpHoverEvents;

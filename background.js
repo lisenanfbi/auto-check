@@ -202,6 +202,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // 保持消息通道开放
   }
 
+  // 处理服务端 IP 查询 API 请求
+  if (message.type === 'FETCH_SERVER_IP_INFO') {
+    (async () => {
+      try {
+        console.log('Background正在处理服务端 IP 查询 API 请求');
+        const ipAddress = message.data?.ipAddress;
+        
+        if (!ipAddress) {
+          throw new Error('IP 地址为空');
+        }
+
+        const response = await fetch(`http://10.83.5.239:7766/api/query?ip=${ipAddress}&all_services=true`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+
+        console.log('服务端 IP 查询 API 响应状态:', response.status);
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log('服务端 IP 查询 API 请求成功:', data);
+        sendResponse({ success: true, data: data });
+      } catch (error) {
+        console.error('服务端 IP 查询 API 请求失败:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+
+    return true; // 保持消息通道开放
+  }
+
   // 处理获取用户信息的请求
   if (message.type === 'FETCH_USER_INFO') {
     (async () => {
